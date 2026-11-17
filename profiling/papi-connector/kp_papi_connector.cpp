@@ -14,6 +14,81 @@
 
 #include "kp_papi_connector_domain.h"
 
+namespace {
+
+using KokkosTools::EventFilter::EventType;
+using KokkosTools::EventFilter::Filter;
+using KokkosTools::EventFilter::FilterError;
+
+const char* kFilterVariable = "KOKKOS_TOOLS_PAPI_FILTER";
+
+void warn_once(bool& warned, const char* message) {
+  if (!warned) {
+    warned = true;
+    printf("%s\n", message);
+  }
+}
+
+// Opens a PAPI region, unless that would exceed PAPI's nesting limit.
+bool papi_begin(const std::string& name) {
+  if (papi_depth >= kMaxPapiDepth) {
+    warn_once(warned_depth,
+              "KokkosP: PAPI connector: more than 10 nested measured events, "
+              "deeper ones are not measured (PAPI limit)");
+    return false;
+  }
+  ++papi_depth;
+  PAPI_hl_region_begin(name.c_str());
+  return true;
+}
+
+void papi_end(const std::string& name) {
+  if (papi_depth > 0) --papi_depth;
+  PAPI_hl_region_end(name.c_str());
+}
+
+// Pushes the PAPI name of a measured event, or "" for an event that is not
+// measured, so that the matching end always pops its own entry.
+void begin_kernel(std::stack<std::string>& stack, const char* kind,
+                  const char* name) {
+  const std::string papi_name = std::string(kind) + ":" + name;
+  if (papi_filter.selected(EventType::Kernel, name) && papi_begin(papi_name)) {
+    stack.push(papi_name);
+  } else {
+    stack.push("");
+  }
+}
+
+void end_kernel(std::stack<std::string>& stack, bool& warned,
+                const char* message) {
+  if (stack.empty()) {
+    warn_once(warned, message);
+    return;
+  }
+  const std::string papi_name = stack.top();
+  stack.pop();
+  if (!papi_name.empty()) papi_end(papi_name);
+}
+
+void reset_state() {
+  papi_filter          = Filter();
+  parallel_for_name    = {};
+  parallel_reduce_name = {};
+  parallel_scan_name   = {};
+  region_name          = {};
+  deep_copy_measured   = {};
+  profile_section.clear();
+  papi_depth        = 0;
+  warned_depth      = false;
+  warned_region_pop = false;
+  warned_for_end    = false;
+  warned_reduce_end = false;
+  warned_scan_end   = false;
+  warned_copy_end   = false;
+}
+
+}  // namespace
+
 extern "C" void kokkosp_init_library(const int loadSeq,
                                      const uint64_t interfaceVer,
                                      const uint32_t /*devInfoCount*/,
@@ -22,6 +97,25 @@ extern "C" void kokkosp_init_library(const int loadSeq,
   printf("KokkosP: PAPI Connector (sequence is %d, version: %llu)\n", loadSeq,
          static_cast<unsigned long long>(interfaceVer));
   printf("-----------------------------------------------------------\n");
+
+  try {
+    papi_filter = Filter::from_env(kFilterVariable);
+  } catch (const FilterError& e) {
+    fprintf(stderr, "KokkosP: PAPI connector: error in %s: %s\n",
+            kFilterVariable, e.what());
+    exit(EXIT_FAILURE);
+  }
+  if (!papi_filter.select_all()) {
+    using KokkosTools::EventFilter::RuleType;
+    printf(
+        "KokkosP: PAPI connector: filter %s: %zu region, %zu region-path, "
+        "%zu kernel, %zu copy, %zu section rules\n",
+        getenv(kFilterVariable), papi_filter.rule_count(RuleType::Region),
+        papi_filter.rule_count(RuleType::RegionPath),
+        papi_filter.rule_count(RuleType::Kernel),
+        papi_filter.rule_count(RuleType::Copy),
+        papi_filter.rule_count(RuleType::Section));
+  }
 
   /* The following advanced functions of PAPI's high-level API are not part
    * of the official release. But they might be introduced in later PAPI
@@ -46,94 +140,84 @@ extern "C" void kokkosp_finalize_library() {
   printf("-----------------------------------------------------------\n");
   printf("KokkosP: Finalization of PAPI Connector. Complete.\n");
   printf("-----------------------------------------------------------\n");
+
+  reset_state();
 }
 
 extern "C" void kokkosp_begin_parallel_for(const char* name, uint32_t /*devid*/,
                                            uint64_t* /*kernid*/) {
-  // printf("kokkosp_begin_parallel_for: %s %d\n", name, *kernid);
-  std::stringstream ss;
-  ss << "kokkosp_parallel_for:" << name;
-  parallel_for_name.push(ss.str());
-  PAPI_hl_region_begin(ss.str().c_str());
+  begin_kernel(parallel_for_name, "kokkosp_parallel_for", name);
 }
 extern "C" void kokkosp_end_parallel_for(uint64_t /*kernid*/) {
-  // printf("kokkosp_end_parallel_for: %d\n", kernid);
-  if (parallel_for_name.empty() == false) {
-    PAPI_hl_region_end(parallel_for_name.top().c_str());
-    parallel_for_name.pop();
-  } else {
-    printf("Begin callback of parallel_for does not exist!\n");
-  }
+  end_kernel(parallel_for_name, warned_for_end,
+             "Begin callback of parallel_for does not exist!");
 }
 
 extern "C" void kokkosp_begin_parallel_reduce(const char* name,
                                               uint32_t /*devid*/,
                                               uint64_t* /*kernid*/) {
-  // printf("kokkosp_begin_parallel_reduce: %s %d\n", name, *kernid);
-  std::stringstream ss;
-  ss << "kokkosp_parallel_reduce:" << name;
-  parallel_reduce_name.push(ss.str());
-  PAPI_hl_region_begin(ss.str().c_str());
+  begin_kernel(parallel_reduce_name, "kokkosp_parallel_reduce", name);
 }
 extern "C" void kokkosp_end_parallel_reduce(uint64_t /*kernid*/) {
-  // printf("kokkosp_end_parallel_reduce: %d\n", kernid);
-  if (parallel_reduce_name.empty() == false) {
-    PAPI_hl_region_end(parallel_reduce_name.top().c_str());
-    parallel_reduce_name.pop();
-  } else {
-    printf("Begin callback of parallel_reduce does not exist!\n");
-  }
+  end_kernel(parallel_reduce_name, warned_reduce_end,
+             "Begin callback of parallel_reduce does not exist!");
 }
 
 extern "C" void kokkosp_begin_parallel_scan(const char* name,
                                             uint32_t /*devid*/,
                                             uint64_t* /*kernid*/) {
-  // printf("kokkosp_begin_parallel_scan: %s %d\n", name, *kernid);
-  std::stringstream ss;
-  ss << "kokkosp_parallel_scan:" << name;
-  parallel_scan_name.push(ss.str());
-  PAPI_hl_region_begin(ss.str().c_str());
+  begin_kernel(parallel_scan_name, "kokkosp_parallel_scan", name);
 }
 extern "C" void kokkosp_end_parallel_scan(uint64_t /*kernid*/) {
-  // printf("kokkosp_end_parallel_scan: %d\n", kernid);
-  if (parallel_scan_name.empty() == false) {
-    PAPI_hl_region_end(parallel_scan_name.top().c_str());
-    parallel_scan_name.pop();
-  } else {
-    printf("Begin callback of parallel_scan does not exist!\n");
-  }
+  end_kernel(parallel_scan_name, warned_scan_end,
+             "Begin callback of parallel_scan does not exist!");
 }
 
 extern "C" void kokkosp_push_profile_region(const char* name) {
-  std::stringstream ss;
-  ss << "kokkosp_profile_region:" << name;
-  region_name.push(ss.str());
-  PAPI_hl_region_begin(ss.str().c_str());
+  const std::string papi_name = std::string("kokkosp_profile_region:") + name;
+  if (papi_filter.push_region(name) && papi_begin(papi_name)) {
+    region_name.push(papi_name);
+  } else {
+    region_name.push("");
+  }
 }
 
 extern "C" void kokkosp_profile_event(const char* /*name*/) {
-  if (region_name.empty() == false) {
+  if (!region_name.empty() && !region_name.top().empty()) {
     PAPI_hl_read(region_name.top().c_str());
   }
 }
 
 extern "C" void kokkosp_pop_profile_region() {
-  if (region_name.empty() == false) {
-    PAPI_hl_region_end(region_name.top().c_str());
-    region_name.pop();
-  } else {
-    printf("Region does not exist!\n");
+  if (region_name.empty()) {
+    warn_once(warned_region_pop,
+              "KokkosP: PAPI connector: pop without matching push");
+    return;
   }
+  const std::string papi_name = region_name.top();
+  region_name.pop();
+  papi_filter.pop_region();
+  if (!papi_name.empty()) papi_end(papi_name);
 }
 
 extern "C" void kokkosp_begin_deep_copy(
-    SpaceHandle /*dst_handle*/, const char* /*dst_name*/,
-    const void* /*dst_ptr*/, SpaceHandle /*src_handle*/,
-    const char* /*src_name*/, const void* /*src_ptr*/, uint64_t /*size*/) {
-  PAPI_hl_region_begin("kokkosp_deep_copy");
+    SpaceHandle /*dst_handle*/, const char* dst_name, const void* /*dst_ptr*/,
+    SpaceHandle /*src_handle*/, const char* /*src_name*/,
+    const void* /*src_ptr*/, uint64_t /*size*/) {
+  const bool measured =
+      papi_filter.selected(EventType::Copy, dst_name ? dst_name : "") &&
+      papi_begin("kokkosp_deep_copy");
+  deep_copy_measured.push(measured);
 }
 extern "C" void kokkosp_end_deep_copy() {
-  PAPI_hl_region_end("kokkosp_deep_copy");
+  if (deep_copy_measured.empty()) {
+    warn_once(warned_copy_end,
+              "KokkosP: PAPI connector: deep copy end without begin");
+    return;
+  }
+  const bool measured = deep_copy_measured.top();
+  deep_copy_measured.pop();
+  if (measured) papi_end("kokkosp_deep_copy");
 }
 
 extern "C" void kokkosp_create_profile_section(const char* name,

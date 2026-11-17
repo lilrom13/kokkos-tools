@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "papi.h"
+#include "utils/kp_event_filter.hpp"
 
 struct SpaceHandle {
   char name[64];
@@ -28,5 +29,24 @@ std::stack<std::string> region_name;
 
 /* map of profile sections */
 std::map<uint32_t, std::string> profile_section;
+
+/* events selected by KOKKOS_TOOLS_PAPI_FILTER (select-all without it) */
+KokkosTools::EventFilter::Filter papi_filter;
+
+/* whether each open deep copy is measured */
+std::stack<bool> deep_copy_measured;
+
+/* PAPI's high-level API allows PAPIHL_MAX_STACK_SIZE (10, in papi_hl.c)
+   nested regions; one more deactivates its output for the whole run. */
+constexpr int kMaxPapiDepth = 10;
+int papi_depth              = 0;
+
+/* one-time warnings */
+bool warned_depth      = false;
+bool warned_region_pop = false;
+bool warned_for_end    = false;
+bool warned_reduce_end = false;
+bool warned_scan_end   = false;
+bool warned_copy_end   = false;
 
 #endif
