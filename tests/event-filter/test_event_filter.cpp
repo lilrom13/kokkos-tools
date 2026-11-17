@@ -118,3 +118,98 @@ TEST(EventFilterEnv, UnsetOrEmptyMeansSelectAll) {
   EXPECT_TRUE(Filter::from_env("KP_TEST_FILTER").select_all());
   unsetenv("KP_TEST_FILTER");
 }
+
+TEST(EventFilterSelect, WholeNameMatch) {
+  auto f = parse("kernel: Hydro.*\n");
+  EXPECT_TRUE(f.selected(EventType::Kernel, "HydroFlux"));
+  EXPECT_FALSE(f.selected(EventType::Kernel, "MyHydroFlux"));
+}
+
+TEST(EventFilterSelect, TypeWithoutRulesIsNeverSelected) {
+  auto f = parse("region: TimeLoop\n");
+  EXPECT_FALSE(f.selected(EventType::Kernel, "anything"));
+  EXPECT_FALSE(f.selected(EventType::Copy, "view_a"));
+  EXPECT_FALSE(f.selected(EventType::Section, "IO"));
+}
+
+TEST(EventFilterSelect, SelectAllSelectsEverything) {
+  Filter f;
+  EXPECT_TRUE(f.selected(EventType::Kernel, "k"));
+  EXPECT_TRUE(f.push_region("r"));
+}
+
+TEST(EventFilterSelect, EmptyFileSelectsNothing) {
+  auto f = parse("\n");
+  EXPECT_FALSE(f.selected(EventType::Kernel, "k"));
+  EXPECT_FALSE(f.push_region("r"));
+}
+
+TEST(EventFilterSelect, RegexMetacharactersInLabels) {
+  const std::string label = "Kokkos::View::initialization [rho] via memset";
+  auto literal            = parse("kernel: " + label + "\n");
+  EXPECT_FALSE(literal.selected(EventType::Kernel, label));
+  auto escaped =
+      parse("kernel: Kokkos::View::initialization \\[rho\\] via memset\n");
+  EXPECT_TRUE(escaped.selected(EventType::Kernel, label));
+}
+
+TEST(EventFilterSelect, CommentAndColonRulesMatch) {
+  auto f =
+      parse("region: AMR: adapt\nregion: a#b\nregion: TimeLoop   # comment\n");
+  EXPECT_TRUE(f.push_region("AMR: adapt"));
+  f.pop_region();
+  EXPECT_TRUE(f.push_region("a#b"));
+  f.pop_region();
+  EXPECT_TRUE(f.push_region("TimeLoop"));
+  f.pop_region();
+}
+
+TEST(EventFilterRegions, NameAndPathRules) {
+  auto f = parse("region: Total\nregion-path: Total/TimeLoop/AMR/MPI ghosts\n");
+  EXPECT_TRUE(f.push_region("Total"));
+  EXPECT_FALSE(f.push_region("TimeLoop"));
+  EXPECT_FALSE(f.push_region("MPI ghosts"));  // Total/TimeLoop/MPI ghosts
+  f.pop_region();
+  EXPECT_FALSE(f.push_region("AMR"));
+  EXPECT_TRUE(f.push_region("MPI ghosts"));  // Total/TimeLoop/AMR/MPI ghosts
+  f.pop_region();
+  f.pop_region();
+  f.pop_region();
+  f.pop_region();
+  EXPECT_EQ(f.open_regions(), 0u);
+}
+
+TEST(EventFilterRegions, SameNameNestedInItself) {
+  auto f = parse("region-path: TimeLoop/TimeLoop\n");
+  EXPECT_FALSE(f.push_region("TimeLoop"));
+  EXPECT_TRUE(f.push_region("TimeLoop"));
+  f.pop_region();
+  EXPECT_FALSE(f.push_region("Other"));
+  f.pop_region();
+  f.pop_region();
+  EXPECT_EQ(f.open_regions(), 0u);
+}
+
+TEST(EventFilterRegions, PopOnEmptyStackIsHarmless) {
+  auto f = parse("region: a\n");
+  f.pop_region();
+  EXPECT_EQ(f.open_regions(), 0u);
+  EXPECT_TRUE(f.push_region("a"));
+}
+
+TEST(EventFilterCache, RepeatedQueriesGiveTheSameAnswer) {
+  auto f = parse("kernel: k[0-9]+\n");
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_TRUE(f.selected(EventType::Kernel, "k42"));
+    EXPECT_FALSE(f.selected(EventType::Kernel, "x"));
+  }
+}
+
+TEST(EventFilterCache, AnswersStayCorrectPastTheCap) {
+  auto f = parse("kernel: step_[0-9]*7\n");
+  for (std::size_t i = 0; i < Filter::cache_cap + 10; ++i) {
+    ASSERT_EQ(f.selected(EventType::Kernel, "step_" + std::to_string(i)),
+              i % 10 == 7)
+        << "i = " << i;
+  }
+}

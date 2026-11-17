@@ -26,12 +26,16 @@
 #include <regex>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace KokkosTools {
 namespace EventFilter {
 
 enum class RuleType { Region, RegionPath, Kernel, Copy, Section };
+
+// Events selected by name alone. Profile regions go through push_region().
+enum class EventType { Kernel, Copy, Section };
 
 class FilterError : public std::runtime_error {
  public:
@@ -152,6 +156,49 @@ class Filter {
 
   bool select_all() const { return select_all_; }
 
+  // Upper bound on the entries of each decision cache. Past it, decisions are
+  // still correct but evaluated each time, so unbounded sets of distinct
+  // names cannot exhaust memory.
+  static constexpr std::size_t cache_cap = 100000;
+
+  // Whether an event of this type and name is selected: any rule of the
+  // matching type matches the whole name.
+  bool selected(EventType type, const std::string& name) {
+    if (select_all_) return true;
+    switch (type) {
+      case EventType::Kernel:
+        return cached(kernel_cache_, RuleType::Kernel, name);
+      case EventType::Copy: return cached(copy_cache_, RuleType::Copy, name);
+      case EventType::Section:
+        return cached(section_cache_, RuleType::Section, name);
+    }
+    return false;
+  }
+
+  // Records that a profile region opens, and returns whether it is selected:
+  // a 'region' rule matches its name, or a 'region-path' rule matches the
+  // '/'-joined names of the open regions, outermost first, this one included.
+  bool push_region(const std::string& name) {
+    open_.push_back(name);
+    if (select_all_) return true;
+    if (cached(region_cache_, RuleType::Region, name)) return true;
+    if (rule_count(RuleType::RegionPath) == 0) return false;
+    std::string path;
+    for (std::size_t i = 0; i < open_.size(); ++i) {
+      if (i > 0) path += '/';
+      path += open_[i];
+    }
+    return cached(path_cache_, RuleType::RegionPath, path);
+  }
+
+  // Records that the innermost profile region closes. No effect when none is
+  // open.
+  void pop_region() {
+    if (!open_.empty()) open_.pop_back();
+  }
+
+  std::size_t open_regions() const { return open_.size(); }
+
   std::size_t rule_count(RuleType type) const {
     std::size_t n = 0;
     for (const auto& rule : rules_) {
@@ -161,8 +208,27 @@ class Filter {
   }
 
  private:
+  using Cache = std::unordered_map<std::string, bool>;
+
+  bool matches(RuleType type, const std::string& name) const {
+    for (const auto& rule : rules_) {
+      if (rule.type == type && std::regex_match(name, rule.regex)) return true;
+    }
+    return false;
+  }
+
+  bool cached(Cache& cache, RuleType type, const std::string& name) const {
+    auto it = cache.find(name);
+    if (it != cache.end()) return it->second;
+    const bool result = matches(type, name);
+    if (cache.size() < cache_cap) cache.emplace(name, result);
+    return result;
+  }
+
   bool select_all_ = true;
   std::vector<Rule> rules_;
+  std::vector<std::string> open_;
+  Cache kernel_cache_, copy_cache_, section_cache_, region_cache_, path_cache_;
 };
 
 }  // namespace EventFilter
