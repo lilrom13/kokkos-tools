@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Tools
+- papi-connector: select the regions, kernels, copies and sections to measure with a filter file (`KOKKOS_TOOLS_PAPI_FILTER`), never nest more than 10 PAPI regions, and honour `KOKKOS_TOOLS_GLOBALFENCES` (#371).
+
 ## 5.3.0
 
 [Full Changelog](https://github.com/kokkos/kokkos-tools/compare/5.2.0...5.3.0)
