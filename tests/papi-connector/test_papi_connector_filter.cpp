@@ -15,6 +15,7 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
+#include "impl/Kokkos_Profiling_C_Interface.h"
 #include "papi.h"  // the stub
 
 // Same layout as the connector's SpaceHandle.
@@ -41,6 +42,7 @@ void kokkosp_create_profile_section(const char*, uint32_t*);
 void kokkosp_destroy_profile_section(uint32_t);
 void kokkosp_start_profile_section(uint32_t);
 void kokkosp_stop_profile_section(uint32_t);
+void kokkosp_request_tool_settings(const uint32_t, Kokkos_Tools_ToolSettings*);
 }
 
 namespace {
@@ -236,4 +238,63 @@ TEST(PapiConnectorFilterDeathTest, MissingFilterFileExits) {
         kokkosp_init_library(0, 0, 0, nullptr);
       },
       ::testing::ExitedWithCode(EXIT_FAILURE), "cannot open file");
+}
+
+TEST(PapiConnectorFilter, UnselectedSectionTouchesNothing) {
+  init("region: TimeLoop\n");
+  uint32_t id = 3;
+  kokkosp_create_profile_section("IO", &id);
+  kokkosp_push_profile_region("TimeLoop");
+  kokkosp_start_profile_section(id);
+  kokkosp_stop_profile_section(id);
+  kokkosp_pop_profile_region();
+  kokkosp_destroy_profile_section(id);
+  fini();
+  EXPECT_EQ(calls(),
+            (std::vector<std::string>{"begin:kokkosp_profile_region:TimeLoop",
+                                      "end:kokkosp_profile_region:TimeLoop"}));
+}
+
+TEST(PapiConnectorFilter, SelectedSectionMeasuredUnderTodaysName) {
+  init("section: IO\n");
+  uint32_t id = 3;
+  kokkosp_create_profile_section("IO", &id);
+  kokkosp_start_profile_section(id);
+  kokkosp_stop_profile_section(id);
+  fini();
+  auto c = calls();
+  ASSERT_GE(c.size(), 2u);
+  EXPECT_EQ(c[0], "begin:IO:3");
+  EXPECT_EQ(c[1], "end:IO:3");
+}
+
+TEST(PapiConnectorSettings, GlobalFencesDefaultOn) {
+  unsetenv("KOKKOS_TOOLS_GLOBALFENCES");
+  init(nullptr);
+  Kokkos_Tools_ToolSettings s{};
+  s.requires_global_fencing = false;
+  kokkosp_request_tool_settings(1, &s);
+  fini();
+  EXPECT_TRUE(s.requires_global_fencing);
+}
+
+TEST(PapiConnectorSettings, GlobalFencesZeroTurnsThemOff) {
+  setenv("KOKKOS_TOOLS_GLOBALFENCES", "0", 1);
+  init(nullptr);
+  Kokkos_Tools_ToolSettings s{};
+  s.requires_global_fencing = true;
+  kokkosp_request_tool_settings(1, &s);
+  fini();
+  unsetenv("KOKKOS_TOOLS_GLOBALFENCES");
+  EXPECT_FALSE(s.requires_global_fencing);
+}
+
+TEST(PapiConnectorSettings, GlobalFencesNonZeroKeepsThemOn) {
+  setenv("KOKKOS_TOOLS_GLOBALFENCES", "1", 1);
+  init(nullptr);
+  Kokkos_Tools_ToolSettings s{};
+  kokkosp_request_tool_settings(1, &s);
+  fini();
+  unsetenv("KOKKOS_TOOLS_GLOBALFENCES");
+  EXPECT_TRUE(s.requires_global_fencing);
 }

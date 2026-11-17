@@ -41,6 +41,10 @@ std::stack<bool> deep_copy_measured;
 constexpr int kMaxPapiDepth = 10;
 int papi_depth              = 0;
 
+/* Kokkos fences before kernel and region callbacks unless
+   KOKKOS_TOOLS_GLOBALFENCES=0 */
+bool global_fences = true;
+
 /* one-time warnings */
 bool warned_depth      = false;
 bool warned_region_pop = false;

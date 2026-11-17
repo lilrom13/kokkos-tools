@@ -12,6 +12,7 @@
 #include <sstream>
 #include <map>
 
+#include "impl/Kokkos_Profiling_C_Interface.h"
 #include "kp_papi_connector_domain.h"
 
 namespace {
@@ -78,6 +79,7 @@ void reset_state() {
   region_name          = {};
   deep_copy_measured   = {};
   profile_section.clear();
+  global_fences     = true;
   papi_depth        = 0;
   warned_depth      = false;
   warned_region_pop = false;
@@ -105,6 +107,9 @@ extern "C" void kokkosp_init_library(const int loadSeq,
             kFilterVariable, e.what());
     exit(EXIT_FAILURE);
   }
+  const char* fences = getenv("KOKKOS_TOOLS_GLOBALFENCES");
+  global_fences      = fences == nullptr || atoi(fences) != 0;
+
   if (!papi_filter.select_all()) {
     using KokkosTools::EventFilter::RuleType;
     printf(
@@ -125,6 +130,11 @@ extern "C" void kokkosp_init_library(const int loadSeq,
   // PAPI_hl_init();
   /* set default values */
   // PAPI_hl_set_events("perf::TASK-CLOCK,PAPI_TOT_INS,PAPI_TOT_CYC,PAPI_FP_OPS");
+}
+
+extern "C" void kokkosp_request_tool_settings(
+    const uint32_t, Kokkos_Tools_ToolSettings* settings) {
+  settings->requires_global_fencing = global_fences;
 }
 
 extern "C" void kokkosp_finalize_library() {
@@ -237,10 +247,11 @@ extern "C" void kokkosp_start_profile_section(uint32_t sec_id) {
   std::map<uint32_t, std::string>::iterator it;
   it = profile_section.find(sec_id);
   if (it != profile_section.end()) {
+    if (!papi_filter.selected(EventType::Section, it->second)) return;
     std::stringstream ss;
     ss << it->second << ":" << sec_id;
     region_name.push(ss.str());
-    PAPI_hl_region_begin(ss.str().c_str());
+    papi_begin(ss.str());
   }
 }
 extern "C" void kokkosp_stop_profile_section(uint32_t sec_id) {
@@ -248,9 +259,10 @@ extern "C" void kokkosp_stop_profile_section(uint32_t sec_id) {
   std::map<uint32_t, std::string>::iterator it;
   it = profile_section.find(sec_id);
   if (it != profile_section.end()) {
+    if (!papi_filter.selected(EventType::Section, it->second)) return;
     std::stringstream ss;
     ss << it->second << ":" << sec_id;
     region_name.push(ss.str());
-    PAPI_hl_region_end(ss.str().c_str());
+    papi_end(ss.str());
   }
 }
